@@ -158,4 +158,7 @@ Top 5 đều thuộc drive_a: `trip-04622` 56,7% (34/60), `trip-03904` 50%, `tri
 
 Điều bạn thấy bất ngờ nhất, điều gì còn chưa rõ, và một lỗi dữ liệu mà bạn nghĩ pipeline **chưa** bắt được (nếu có). Tối đa 8 dòng.
 
-(trả lời ở đây)
+- **Bất ngờ nhất**: `trip-04622` chạy 67 km/h mà bị loại 56,7% khung, toàn bộ vì `is_near_dup`. Tôi nghĩ khung trùng chỉ đến từ xe chậm hoặc camera đứng hình, nhưng ảnh `02401` và `02411` cho thấy đường thẳng giữa hai bức tường cũng làm dHash 64-bit gần như không đổi. Cũng bất ngờ là độ trễ đồng bộ chỉ có hai cụm (0–29 và 80–129 ms), nên ngưỡng 25/50/75 ms cho cùng kết quả.
+- **Lỗi pipeline chưa bắt được**: chính các khung "trùng giả" ở trên. Xe đang di chuyển (telemetry đổi) nhưng khung vẫn bị bỏ, làm test drive_a chỉ còn 37 khung. Nên kết hợp dHash với tốc độ hoặc quãng đường trước khi loại. Ngoài ra pipeline chỉ kiểm tra tốc độ trong 0..70 m/s, chưa bắt giá trị hợp lệ nhưng nhảy bất thường giữa hai mẫu (gia tốc vô lý), và chỉ trừ độ lệch đồng hồ đã *khai báo*; nếu `sources.json` khai sai thì không test nào phát hiện.
+- **Còn chưa rõ**: cách tính trip từ MSSV có chữ cái (tôi dùng phần chữ số, ra `trip-08888`), và vì sao manifest không ghi phiên bản mã/dbt và các ngưỡng, dù chúng quyết định nội dung dataset.
+- **Trở ngại vận hành**: trên Windows, `core.autocrlf` đổi `.sh` sang CRLF khiến Airflow không khởi động (`exec /airflow-entrypoint.sh: no such file`), và Git Bash đổi đường dẫn `/opt/lab`; phải đặt `core.autocrlf input` và `MSYS_NO_PATHCONV=1`.
