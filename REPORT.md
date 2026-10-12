@@ -4,15 +4,15 @@
 
 | | |
 |---|---|
-| Họ và tên | `<điền>` |
+| Họ và tên | Trương Thị Lan Anh |
 | MSSV (đúng bằng `LAB_STUDENT_ID` trong `.env`) | `<điền>` |
-| GitHub | `<điền: tên tài khoản>` |
+| GitHub | SxAinsworth |
 | Trip dùng cho bài tập sập và chạy lại (xem GUIDE, bước 5) | `<điền: trip-xxxxx>` |
 
 ## Kết quả cuối
 
-- `dataset_version` của bạn: `<điền>`  (phải khớp `report/evidence/run_summary.json`)
-- Số khung hình train / val / test của bạn: `<điền>`
+- `dataset_version` của bạn: `f7bbaac3feee`  (phải khớp `report/evidence/run_summary.json`)
+- Số khung hình train / val / test của bạn: `756 / 123 / 140` (tổng 1019 khung; 18 / 4 / 4 trip)
 - `report/verify.txt`: tạo bằng `python3 scripts/check_submission.py --save-verify` (phải có `27/27 checks passed`).
 - Ảnh chụp trong `report/screenshots/`: `airflow_graph.png`, `minio_lake.png`, `metabase_dashboard.png`, và ảnh bài tập sập/chạy lại (log task đỏ thấy trip của bạn).
 
@@ -21,7 +21,14 @@
 ### Câu 1
 Liệt kê **ít nhất 4 khác biệt** giữa telemetry nguồn A và nguồn B mà bạn thấy ở bronze. Vì sao pipeline giữ **mỗi nguồn một bảng bronze** và để mọi cột ở dạng chữ, thay vì gộp và ép kiểu ngay?
 
-(trả lời ở đây)
+Ở bronze, A có 3021 dòng, B có 3234 dòng. Hai dòng đầu mỗi bảng cho thấy B khác A ở:
+1. **Thời gian**: A là chuỗi ISO UTC (`ts_utc` = `2025-10-07T08:00:00.014Z`), B là epoch mili giây (`timestamp_ms` = `1759933801509`).
+2. **Đơn vị tốc độ**: A là m/s (`speed_mps` = 1.213), B là km/h (`spd_kmh` = 55.11).
+3. **Tên cột**: `heading_deg/lat/lon/alt_m/acc_x/acc_y/steer` ở A thành `hdg/latitude/longitude/altitude/ax/ay/steering` ở B.
+4. **Bàn đạp**: A là tỉ lệ 0–1 (`gas` = 0.028, `brake`), B là phần trăm (`throttle_pct` = 2.0, `brake_pct`).
+5. **Đồng hồ**: `bronze_video_files` ghi `telemetry_clock_offset_ms` = 0 cho drive_a nhưng 1500 cho drive_b, tức đồng hồ thiết bị B lệch 1,5 s so với video.
+
+Bronze là bản ghi trung thực của nguồn: gộp hai nguồn ngay ở đây đã là một phép biến đổi (đổi tên, đổi đơn vị), nếu logic đó sai thì không còn bản gốc để chạy lại. Giữ mọi cột là chữ (14 cột dữ liệu của B đều `VARCHAR`) để lần nạp không bao giờ hỏng vì dữ liệu bẩn: mỗi nguồn có 30 ô tốc độ trống, ép kiểu ngay thì hoặc lỗi cả lô, hoặc bị đổi im lặng thành NULL/0 và mất dấu lỗi gốc. Việc ép kiểu, đổi đơn vị, trừ độ lệch đồng hồ và cách ly dòng lỗi để sang Silver. Mỗi dòng còn mang `_source_file`, `_batch_id`, `_row_no` để truy vết. Nạp lại lần hai báo `already present` (nhận diện video bằng sha256), và `history bronze.raw_telemetry_a` chỉ có 1 commit (version 0, 3021 dòng): chạy lại không nhân đôi.
 
 ## Bước 2 · Silver telemetry
 
