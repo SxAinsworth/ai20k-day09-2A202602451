@@ -5,9 +5,11 @@
 | | |
 |---|---|
 | Họ và tên | Trương Thị Lan Anh |
-| MSSV (đúng bằng `LAB_STUDENT_ID` trong `.env`) | `<điền>` |
+| MSSV (đúng bằng `LAB_STUDENT_ID` trong `.env`) | 2A202602451 |
 | GitHub | SxAinsworth |
-| Trip dùng cho bài tập sập và chạy lại (xem GUIDE, bước 5) | `<điền: trip-xxxxx>` |
+| Trip dùng cho bài tập sập và chạy lại (xem GUIDE, bước 5) | trip-08888 |
+
+> Ghi chú cách tính trip: MSSV có chữ `A` nên `int(MSSV)` của GUIDE báo lỗi; tôi lấy phần chữ số `2202602451` → `2202602451 % 26 = 23` → phần tử thứ 23 của `cli list-trips` là `trip-08888`.
 
 ## Kết quả cuối
 
@@ -103,18 +105,34 @@ Hai lần chạy liên tiếp: `step 4` rồi `cli export-dataset` đều ra `f7
 ### Câu 9
 Mô tả chính xác điều xảy ra khi trip của bạn sập rồi chạy lại: bao nhiêu task chuyển đỏ, bao nhiêu task `upstream_failed`, bạn clear gì, dữ liệu có nhân đôi không, `dataset_version` có đổi không? Bằng chứng (ảnh, số) là gì?
 
-(trả lời ở đây)
+Đặt `LAB_FAIL_ONCE=trip-08888`, trigger `day09_reset` rồi `day09_video_pipeline` (run `crash_run`): đúng **1 task đỏ** là `silver_frames` map index 23; log ghi `RuntimeError: simulated crash while extracting trip-08888; run it again` (`fail_task_log.png`). **7 task `upstream_failed`**: `dbt_run_silver`, `dbt_test_silver`, `dbt_run_gold`, `dbt_test_gold`, `publish_lake`, `export_dataset`, `publish_warehouse` (`fail_graph.png`). 29 task còn lại xanh: 25 `silver_frames` khác + 3 bronze + `trip_commands`.
+
+Tôi chỉ clear task đỏ kèm downstream (`--only-failed --downstream`): đúng **8 task chạy lại** (silver_frames[23] + 7 task sau), 29 task đã xanh **không** chạy lại; run chuyển `success`, 37/37 task xanh (`airflow_retry_graph.png`). Sau đó `verify` đạt **27/27**. Không nhân đôi: `silver.frames` có 1246 dòng = 1246 `frame_id` khác nhau, và `history silver.frames` chỉ có **một** commit cho `trip-08888` (v25, 60 dòng), vì lần sập xảy ra trước khi ghi, còn lần chạy lại ghi bằng overwrite theo partition. `dataset_version` **không đổi**: vẫn `f7bbaac3feee`, 756/123/140. Đây là lợi ích của việc chia `silver_frames` thành 26 task theo trip: hỏng một trip chỉ tốn chạy lại một trip.
 
 ### Câu 10
 Nâng từ 2 drive lên **500 xe mỗi ngày**: ba thành phần nào của pipeline này sẽ vỡ đầu tiên, và bạn thay bằng gì (nối với slide 12, 22, 23)?
 
-(trả lời ở đây)
+Hiện 2 drive (~10 phút video, 1246 khung) chạy mất khoảng 2 phút trên một container. 500 xe/ngày, mỗi xe vài giờ, 7 camera, là gấp hàng chục nghìn lần.
+1. **Giải mã video (FFmpeg trong một container Airflow)** vỡ đầu tiên: decode là nút cổ chai CPU (slide 24), và `silver_frames` đang chạy tuần tự (`max_active_tis_per_dagrun=1`, `PARALLELISM=2`), khoảng 3 s/trip trong log của tôi. Thay bằng hàng đợi + cụm worker tự co giãn (Kubernetes/Ray/Spark), decode bằng GPU (NVDEC), xử lý ngay khi file về (sự kiện từ object storage) thay vì theo lô.
+2. **DuckDB + dbt trên một máy** (slide 22): bảng Delta đọc/ghi từ một tiến trình, toàn bộ ASOF join nằm trong RAM. Thay bằng engine phân tán (Spark/Trino trên Delta hoặc Iceberg), partition theo ngày/xe, xử lý tăng dần thay vì chạy lại toàn bộ.
+3. **Airflow với 1 task/trip, LocalExecutor, 1 container**: hàng chục nghìn trip/ngày sẽ làm scheduler và metadata DB quá tải. Chuyển sang CeleryExecutor/KubernetesExecutor, gom trip thành lô, hoặc dùng công cụ streaming (Kafka → Flink) cho telemetry (slide 23). Ngoài ra MinIO một node cần thành cluster/S3, và Postgres + Metabase cần warehouse cột (BigQuery/ClickHouse).
 
 ## Câu hỏi riêng của bạn trên Metabase
 
 Câu SQL bạn thêm vào dashboard và điều nó cho biết:
 
-(trả lời ở đây)
+Câu hỏi: **trip nào bị loại nhiều khung nhất, và vì sao?** (card đầu tiên trong `metabase_dashboard.png`)
+
+```sql
+select trip_id, drive_id, split, lighting, avg_speed_kmh,
+       frames, frames_kept, frames - frames_kept as frames_dropped,
+       round(100.0 * (frames - frames_kept) / frames, 1) as pct_dropped
+from marts.mart_trip_summary
+order by pct_dropped desc
+limit 10
+```
+
+Top 5 đều thuộc drive_a: `trip-04622` 56,7% (34/60), `trip-03904` 50%, `trip-02086` 46,7%, `trip-08888` 40%, `trip-07774` 38,2%. Gộp theo tốc độ trung bình của trip: < 20 km/h bị loại 32,4% khung, 20–50 km/h 17,1%, ≥ 50 km/h 14,4%, khớp với Câu 5: xe chậm thì hai khung liền nhau giống nhau. Ngoại lệ đáng chú ý là `trip-04622` chạy **67 km/h** mà bị loại nhiều nhất. Tra silver cho thấy cả 34 khung bị loại đều do `is_near_dup` (không có khung đen/mờ/mất đồng bộ). Tôi mở hai ảnh `02401.jpg` và `02411.jpg`: đó là đường thẳng có tường cao hai bên, bám theo cùng một xe phía trước, nên ảnh gần như không đổi dù xe đang chạy. Hai trip `test` của drive_a cũng nằm trong top 2, nên test A chỉ còn 37 khung. Điều này cho thấy ngưỡng dHash cố định có thể làm mỏng tập test.
 
 ## Nhìn lại
 
