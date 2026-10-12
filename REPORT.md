@@ -80,17 +80,23 @@ Khung hình **đen** và khung hình **tối** khác nhau thế nào, pipeline x
 ### Câu 6
 Dựa vào `leakage.json`: chia theo khung hình làm bao nhiêu trip bị chia cắt, so với chia theo trip? Vì sao điều này làm điểm kiểm thử đẹp một cách giả tạo?
 
-(trả lời ở đây)
+Trong `leakage.json`: có 1019 khung đáng dùng thuộc 26 trip. Chia **theo khung hình** (ngẫu nhiên 70/15/15) thì **26/26 trip** bị chia cắt qua nhiều split, và cả **26 trip** đều có khung ở cả train lẫn test. Chia **theo trip** (gold của pipeline) thì **0 trip** bị chia cắt: 18 trip train, 4 val, 4 test, và test `no trip is in two splits` của verify đạt.
+
+Ở 2 khung/giây, hai khung liền nhau của cùng trip gần như giống hệt: cùng con đường, cùng ánh sáng, thời tiết, cùng xe phía trước (riêng drive A đã có 149 cặp liền nhau gần trùng ở ngưỡng dHash 2). Nếu khung t nằm ở train và khung t+0,5 s nằm ở test, mô hình chỉ cần "nhớ" cảnh là trả lời đúng, nên điểm test đo khả năng ghi nhớ chứ không phải khả năng tổng quát hoá sang cảnh mới. Khi triển khai trên con đường chưa từng thấy, độ chính xác sẽ tụt so với con số đã báo cáo. Chia theo trip buộc test là các cảnh mô hình chưa thấy, giống điều kiện thật.
 
 ### Câu 7
 Vì sao `dataset_version` là **băm nội dung** chứ không phải ngày giờ hay số đếm? Hai lần chạy liên tiếp cho kết quả gì? Vì sao `dataset_version` của bạn **khác** bạn bè dù cùng dữ liệu (liên hệ MSSV)?
 
-(trả lời ở đây)
+`dataset_version` của tôi là **`f7bbaac3feee`** = 12 ký tự đầu của sha256 trên danh sách `frame_id|split` (sắp theo `frame_id`, trong `pipeline/publish.py`). Nó là **băm nội dung** nên trả lời đúng câu hỏi "hai dataset có giống nhau không": cùng khung, cùng split thì cùng version, dù chạy lúc nào, trên máy nào; chỉ cần một khung đổi split hoặc bị thêm/bớt là version đổi. Ngày giờ hoặc số đếm thì đổi sau mỗi lần chạy dù nội dung không đổi (một mô hình train trên "v5" không cho biết v5 chứa gì), và hai máy có thể đặt cùng số cho hai nội dung khác nhau.
+
+Hai lần chạy liên tiếp: `step 4` rồi `cli export-dataset` đều ra `f7bbaac3feee`, 1019 khung (756/123/140) và cùng `manifest_sha256` `6a7f4db7…e894`; trùng cả với lần `step all` đầu tiên. Bản của tôi khác bạn bè vì `gold_dataset_frames.sql` xếp trip trong mỗi drive theo `md5(trip_id || LAB_STUDENT_ID)`: MSSV `2A202602451` là "muối" làm đổi thứ tự trip, do đó đổi trip nào rơi vào train/val/test → số khung mỗi split khác (của tôi: A 338/61/37, B 418/62/103) → danh sách `frame_id|split` khác → hash khác. Dữ liệu và luật lọc giống hệt nên tổng 1019 khung vẫn như nhau, chỉ cách chia khác.
 
 ### Câu 8
 Đọc phần `lineage` trong `manifest.json` của dataset bạn. Trả lời "dataset này được tạo từ dữ liệu nào?" bằng chính nội dung đó. Nếu một người hỏi 3 tháng sau, thông tin nào giúp tái tạo lại đúng dataset này?
 
-(trả lời ở đây)
+`lake/gold/datasets/f7bbaac3feee/manifest.json` trả lời: dataset này được tạo từ hai video gốc có sha256 `636ba1a9…e9aa` (drive_a) và `bfa62703…9fdc` (drive_b), qua các bảng Delta ở đúng phiên bản: `bronze.raw_telemetry_a` v0, `bronze.raw_telemetry_b` v0, `bronze.trips_raw` v0, `bronze.video_files` v1, `silver.telemetry` v0, `silver.frames` **v25**, `silver.frames_flagged` v0, `silver.frame_telemetry` v0 (manifest của lần chạy cuối `step all --reset`). `silver.frames` ở v25 vì mỗi trip là một commit overwrite theo partition: 26 trip → v0–v25. Lúc làm bước 4 (trước khi reset) tôi đọc được v27, vì thêm 2 lần chạy lại `trip-00003` của thí nghiệm idempotency (`history` xác nhận). Hai manifest khác số phiên bản bảng nhưng cùng `dataset_version` `f7bbaac3feee` và cùng `manifest_sha256` `6a7f4db7…e894`, vì version chỉ phụ thuộc nội dung. Manifest còn ghi luật: loại `is_black, is_blurry, is_near_dup, not sync_ok`; split "per trip, stratified by drive, md5 order"; kết quả 1019 khung (A 436, B 583), 756/123/140, 18/4/4 trip.
+
+3 tháng sau, để tái tạo đúng dataset cần: (1) sha256 video để kiểm tra đúng file gốc; (2) số phiên bản từng bảng Delta để time travel về đúng trạng thái đó, kể cả khi bảng đã được ghi thêm; (3) luật lọc, luật chia và MSSV (muối của split); (4) `dataset_version` và `manifest_sha256` để kiểm chứng kết quả tái tạo trùng khớp. Manifest **chưa** ghi phiên bản mã/dbt (commit git) và các ngưỡng (`dup_hamming` = 2, `sync_tol_ms` = 150...), nên tôi sẽ thêm commit hash của repo vào lineage.
 
 ## Bước 5 · Điều phối và phục vụ
 
