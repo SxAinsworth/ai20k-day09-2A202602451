@@ -35,12 +35,21 @@ Bronze là bản ghi trung thực của nguồn: gộp hai nguồn ngay ở đâ
 ### Câu 2
 Pipeline đưa hai nguồn về một schema như thế nào (đơn vị, kiểu thời gian, **độ lệch đồng hồ**)? Bằng chứng nào trong kết quả bước 2 cho thấy đã đúng? Dán bảng quarantine của bạn (số dòng theo từng lý do, từng drive) và giải thích vì sao dòng lỗi vào `rejects` thay vì bị xoá.
 
-(trả lời ở đây)
+`stg_telemetry_b.sql` đưa B về schema của A: đổi tên cột (`spd_kmh`→`speed_mps`, `hdg`→`heading_deg`, ...), tốc độ chia 3,6 (km/h → m/s), bàn đạp chia 100 (% → 0–1), và thời gian `to_timestamp((timestamp_ms − offset_ms)/1000)`, tức epoch ms → timestamp UTC **sau khi trừ** `telemetry_clock_offset_ms` = 1500 lấy từ `bronze.video_files` (không hard-code). A chỉ cần ép kiểu. Bằng chứng: mẫu đầu tiên của B sau chỉnh là `2025-10-08 14:30:00.009` UTC, khớp giờ bắt đầu video B `14:30:00` (lệch 9 ms; nếu không trừ sẽ lệch 1,5 s). Tốc độ tối đa sau chuẩn hoá hợp lý: 71 km/h (A), 100 km/h (B).
+
+| drive | duplicate | speed_missing | speed_out_of_range | tổng rejects | sạch | nhận về |
+|---|---|---|---|---|---|---|
+| drive_a | 20 | 30 | 3 | 53 | 2968 | 3021 |
+| drive_b | 20 | 30 | 3 | 53 | 3181 | 3234 |
+
+Sạch + cách ly = nhận về ở cả hai drive (2968+53=3021, 3181+53=3234): không dòng nào biến mất. 6 dòng `speed_out_of_range` đều là 250 m/s (900 km/h). Dòng lỗi vào `silver_telemetry_rejects` kèm lý do, `_batch_id` và `_row_no` thay vì bị xoá, vì: (1) đếm được và đối soát được, ví dụ 30 dòng thiếu tốc độ/drive cho biết cảm biến có vấn đề; (2) truy ngược đúng dòng trong file nguồn để báo đội thu thập; (3) nếu luật lọc sai thì vẫn khôi phục được dữ liệu. Xoá im lặng thì số liệu "trông sạch" nhưng không ai biết đã mất gì.
 
 ### Câu 3
 Vì sao test `max_gap_ms` là `warn` còn `in_range` là `error`? Kết quả thí nghiệm `break-gate` của bạn (`break_gate.json`): test nào bắt được, bao nhiêu dòng, và điều đó cho biết gì về vai trò của "cổng chất lượng"?
 
-(trả lời ở đây)
+`max_gap_ms` (khoảng trống > 1000 ms giữa hai mẫu) là `warn` vì mất tín hiệu là hiện tượng **có thật** của cảm biến, dữ liệu còn lại vẫn đúng và dùng được. Ở bài của tôi mỗi drive có đúng 1 khoảng trống > 1 s (A: 3073 ms, B: 3124 ms, trung vị 100 ms ≈ 10 Hz). Dừng cả pipeline vì vài giây mất sóng là quá tay; chỉ cần báo để theo dõi. Hậu quả của nó đã được xử lý ở chỗ khác: ở bước 3 tôi kiểm tra thấy đúng 6 khung/drive rơi vào khoảng trống đó (A: 08:01:59.5–08:02:02, B: 14:31:30.2–14:31:32.7, độ trễ 384→2884 ms và 612→3112 ms) bị gắn `sync_lost` (vượt `sync_tol_ms` = 150) và bị loại khỏi gold. Ngược lại `in_range` (0..70 m/s) là `error` vì tốc độ vô lý là dữ liệu **sai**: nếu lọt vào silver nó sẽ đi thẳng vào nhãn huấn luyện và mart.
+
+Thí nghiệm `break-gate`: nới luật làm sạch `max_speed_mps` từ 70 lên 1000 → 6 dòng 250 m/s (3 mỗi drive) không còn bị cách ly mà lọt vào `silver_telemetry`. `dbt test` ra `PASS=5 WARN=1 ERROR=1`: test `in_range_silver_telemetry_speed_mps__70__0` bắt đúng **6 dòng**, khớp số dòng `speed_out_of_range` ở Câu 2. Khôi phục luật → `PASS=6 WARN=1 ERROR=0`. Điều này cho thấy cổng chất lượng là lớp phòng thủ **độc lập** với logic làm sạch: khi ai đó vô tình nới luật, test `error` vẫn chặn và các task phía sau (frames, gold) không chạy, dữ liệu xấu không đi tiếp. Test `warn` thì chỉ báo.
 
 ## Bước 3 · Silver frames
 
