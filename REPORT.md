@@ -56,18 +56,24 @@ Thí nghiệm `break-gate`: nới luật làm sạch `max_speed_mps` từ 70 lê
 ### Câu 4
 Dựa vào `idempotency.json`: số dòng trước và sau hai lần chạy lại, và khi ghi kiểu `append`. Vì sao Delta `overwrite` theo partition (một trip) an toàn hơn xoá rồi ghi lại, nhất là khi giữa chừng có lỗi?
 
-(trả lời ở đây)
+Thí nghiệm chạy lại partition `trip-00003` (60 khung). Cách của pipeline (Delta `overwrite` với predicate `trip_id = 'trip-00003'`): trước là **1246 dòng**, dấu vân tay `6c7480dfde7e`; sau **2 lần chạy lại** vẫn **1246 dòng**, dấu vân tay `6c7480dfde7e` → `unchanged: true`. Cách sai (`append`, chạy 2 lần): trip này còn **120 dòng** cho 60 khung, tức nhân đôi 2x; chạy thêm lần nữa sẽ thành 3x.
+
+Overwrite theo partition an toàn hơn "xoá rồi ghi lại" vì Delta ghi file mới trước, rồi thay phần dữ liệu cũ của trip bằng **một commit nguyên tử** trong transaction log. Nếu task sập giữa chừng thì commit không được ghi: người đọc vẫn thấy bản cũ đầy đủ, file dở dang chỉ là rác chưa được tham chiếu. Còn xoá-rồi-ghi là hai thao tác riêng: sập sau khi xoá và trước khi ghi xong thì trip đó **mất dữ liệu** (hoặc có một nửa), và người đọc có thể thấy trạng thái trống ở giữa. Nhờ vậy Airflow có thể retry/backfill một trip bất kỳ mà không cần dọn dẹp tay, và lịch sử commit vẫn cho time travel về bản trước.
 
 ### Câu 5
 Khung hình **đen** và khung hình **tối** khác nhau thế nào, pipeline xử lý khác nhau ra sao, bạn có đồng ý không? Dựa vào `threshold.json`: nếu chọn ngưỡng 0, 2, 6 thì bao nhiêu khung bị coi là trùng ở mỗi drive? Bạn chọn ngưỡng nào, vì sao, và ngưỡng đó phụ thuộc vào tốc độ xe thế nào?
 
 | dHash khác tối đa | số khung trùng, drive A | số khung trùng, drive B |
 |---|---|---|
-| 0 | | |
-| 2 | | |
-| 6 | | |
+| 0 | 61 | 8 |
+| 2 | 149 | 53 |
+| 6 | 363 | 244 |
 
-(trả lời ở đây)
+(drive A có 602 khung, B có 644; ngưỡng 1/4/8: A 109/269/438, B 23/137/348.)
+
+**Đen và tối**: khung **đen** có độ sáng trung bình < 12 (`dark_luma`). Ở bài của tôi độ sáng trung bình của khung đen là 0,0, tức là lỗi camera/mất tín hiệu, không chứa thông tin, nên bị loại khỏi gold (A: 6, B: 4). Khung **tối** có độ sáng 12–40 (`dark_soft`, trung bình 37,4 ở A và 30,8 ở B, so với 104/88 ở khung thường), là cảnh thật như đường hầm, bóng râm, nên chỉ gắn cờ `is_dark` và **giữ lại** (A: 4, B: 61). Tôi đồng ý: mô hình xe tự lái phải học cả điều kiện thiếu sáng; bỏ khung tối sẽ làm dataset lệch về ban ngày và mô hình kém đúng ở chỗ khó nhất. Cờ vẫn có để lọc hoặc cân bằng lại khi cần.
+
+**Ngưỡng trùng**: ngưỡng 0 chỉ bắt khung giống hệt (A: 61, gần như toàn là đoạn camera đứng hình); ngưỡng 6 coi 363/602 khung của A (60%) và 244/644 của B là trùng, sẽ loại cả khung khác nhau thật. Tôi giữ ngưỡng **2**: bắt được khung đứng hình (11/12 khung đóng băng ở A bị bắt) mà chỉ loại 25% khung A và 8% khung B. Ngưỡng phụ thuộc tốc độ: ở 2 khung/giây, xe càng chậm thì hai khung liền nhau càng giống. Số liệu của tôi với ngưỡng 2: drive A khi xe < 2 m/s có **59,3%** khung bị coi là trùng, còn ở 2–8 m/s chỉ 11,3%; drive B (chạy nhanh, phần lớn ≥ 15 m/s) chỉ 9,9%. Vì vậy ngưỡng cố định sẽ loại quá nhiều khi kẹt xe hoặc dừng đèn đỏ. Cách tốt hơn là cho ngưỡng phụ thuộc tốc độ, hoặc lấy mẫu theo quãng đường thay vì theo thời gian.
 
 ## Bước 4 · Gold
 
