@@ -134,6 +134,26 @@ limit 10
 
 Top 5 đều thuộc drive_a: `trip-04622` 56,7% (34/60), `trip-03904` 50%, `trip-02086` 46,7%, `trip-08888` 40%, `trip-07774` 38,2%. Gộp theo tốc độ trung bình của trip: < 20 km/h bị loại 32,4% khung, 20–50 km/h 17,1%, ≥ 50 km/h 14,4%, khớp với Câu 5: xe chậm thì hai khung liền nhau giống nhau. Ngoại lệ đáng chú ý là `trip-04622` chạy **67 km/h** mà bị loại nhiều nhất. Tra silver cho thấy cả 34 khung bị loại đều do `is_near_dup` (không có khung đen/mờ/mất đồng bộ). Tôi mở hai ảnh `02401.jpg` và `02411.jpg`: đó là đường thẳng có tường cao hai bên, bám theo cùng một xe phía trước, nên ảnh gần như không đổi dù xe đang chạy. Hai trip `test` của drive_a cũng nằm trong top 2, nên test A chỉ còn 37 khung. Điều này cho thấy ngưỡng dHash cố định có thể làm mỏng tập test.
 
+## Thí nghiệm riêng (bonus): đổi `sync_tol_ms`
+
+**Câu hỏi**: `sync_tol_ms` = 150 (độ lệch tối đa giữa khung và dòng telemetry ghép với nó) có hợp lý không, và siết nó thì dataset thay đổi ra sao?
+
+**Trước** (mặc định 150 ms): gold 1019 khung, 756/123/140, `dataset_version` `f7bbaac3feee`, chỉ 14 khung bị loại vì mất đồng bộ (7/drive, xem Câu 3).
+
+**Phân bố độ trễ** (`silver_frame_telemetry`): telemetry ~10 Hz (trung vị 100 ms giữa hai mẫu) nên độ trễ ASOF tách thành **hai cụm**: 0–29 ms (A 330 khung, B 316) và 80–129 ms (A 265, B 321). Không có khung nào trong khoảng 30–79 ms. p50 = 18 ms (A) / 81 ms (B), p99 = 120 ms ở cả hai. Tính lại số khung giữ được (sau khi đã loại đen/mờ/trùng) theo từng ngưỡng:
+
+| `sync_tol_ms` | giữ A | giữ B | tổng giữ | loại vì sync |
+|---|---|---|---|---|
+| 25 / 50 / 75 | 242 | 296 | 538 | 495 |
+| 100 | 345 | 417 | 762 | 271 |
+| **150 (mặc định)** | **436** | **583** | **1019** | **14** |
+| 300 | 436 | 583 | 1019 | 14 |
+| 1000 | 438 | 584 | 1022 | 11 |
+
+**Chạy thật với 100 ms** (`dbt run --select silver_frame_telemetry --vars '{sync_tol_ms: 100}'` rồi `step 4`): gold còn **762 khung** (−25%), 576/83/103 (A 269/45/31, B 307/38/72), `dataset_version` đổi thành **`05cc3a4d63ba`**, verify module 4 vẫn 7/7. Số trip mỗi split không đổi (18/4/4) vì split theo `md5(trip_id || MSSV)`, chỉ số khung trong mỗi trip giảm. **Sau khi khôi phục** (chạy lại không `--vars`): quay về `f7bbaac3feee`, 1019 khung. Không file cấu hình nào bị sửa.
+
+**Kết luận**: ngưỡng phải lớn hơn chu kỳ lấy mẫu telemetry (~100 ms + jitter, p99 = 120 ms). Đặt dưới 100 ms không làm dữ liệu "chính xác hơn", mà loại một nửa số khung chỉ vì khung rơi vào nửa sau của chu kỳ telemetry, trong khi telemetry cách 100 ms ở 60 km/h chỉ lệch ~1,7 m. 150 ms là điểm hợp lý: giữ toàn bộ cụm 80–129 ms, chỉ loại khung thật sự mất tín hiệu (khoảng trống ~3 s). Tăng lên 300–1000 ms không thêm khung nào đáng kể (+3 khung ở 1000 ms) nhưng bắt đầu chấp nhận khung ở rìa khoảng mất tín hiệu, nhãn sai tới 1 s. Một ngưỡng "đẹp" như 50 ms sẽ âm thầm làm mất 47% dataset (1019 → 538), 100 ms mất 25%, và `dataset_version` đổi là dấu hiệu để phát hiện điều đó.
+
 ## Nhìn lại
 
 Điều bạn thấy bất ngờ nhất, điều gì còn chưa rõ, và một lỗi dữ liệu mà bạn nghĩ pipeline **chưa** bắt được (nếu có). Tối đa 8 dòng.
